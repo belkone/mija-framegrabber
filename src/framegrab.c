@@ -3,12 +3,15 @@
 #include <pthread.h>
 #include <sys/types.h>
 #include <ev.h>
+#include <stdbool.h>
 #include <fcntl.h>
-
-#define MAX_PIPES_PER_STREAM 10
+#include <poll.h>
 
 #define CHANNEL_MAINSTREAM 0
 #define CHANNEL_SUBSTREAM 1
+
+#define MAX_RETRIES 10
+#define COOLDOWN_MICROSECONDS 1000
 
 // #define ENABLE_DEBUG_LOG
 
@@ -20,7 +23,6 @@ struct ev_loop_struct {
 };
 
 void (*ptr_process_video_frame)(uint ,int ,int ,unsigned long );
-
 
 static struct ev_loop * ev_loop_Ptr= 0;
 static unsigned long ptr_process_audio_frame= 0;
@@ -55,32 +57,53 @@ static unsigned long hdlBuffer;
 
 static char cThreadRunning = 0;
 
-static int mainstreamCounter = 0, substreamCounter = 0;
-static FILE* mainstreamPipes[MAX_PIPES_PER_STREAM];
-static FILE* substreamPipes[MAX_PIPES_PER_STREAM];
+static char* outputFilePath = NULL;
+static struct pollfd outputFile[1];
+static int targetVideoChannel = -1;
+static int written;
+static int totalWritten;
+static int retryCounter;
+static int pollResult;
 
 void process_video_frame(uint videoChannel,int ptrFrame,int ptrFramePayload,unsigned long frame_size)
 {
-	
 #ifdef ENABLE_DEBUG_LOG
-	printf("got frame %d frame_size=%d\n",videoChannel, frame_size);
+  printf("got frame %d frame_size=%d\n",videoChannel, frame_size);
 #endif
 
-	if(videoChannel == 0){
-		for(int i=0; i<mainstreamCounter; i++) {
-			write(mainstreamPipes[i], ptrFramePayload, frame_size*sizeof(char));
-		}
-	}
-	
-	if(videoChannel == 1){
-		for(int i=0; i<substreamCounter; i++) {
-			write(substreamPipes[i], ptrFramePayload, frame_size*sizeof(char));
-		}
-	}
+  if(videoChannel == targetVideoChannel) {
+
+    pollResult = poll(outputFile, 1, 0);
+
+    if(pollResult > 0) {  
+
+      totalWritten = 0;
+      retryCounter = 0;
+
+      do {
+
+        written = write(outputFile[0].fd, ptrFramePayload+totalWritten, (frame_size-totalWritten) * sizeof(char));
+
+        if(written > 0) {
+          totalWritten += written;
+        }
+
+        if(totalWritten < frame_size*sizeof(char)) {
+          usleep(COOLDOWN_MICROSECONDS);
+        }
+
+        if(totalWritten < frame_size*sizeof(char) || retryCounter > 0) {
+          printf("%d | %d | %d\n", frame_size*sizeof(char), totalWritten, retryCounter);
+        }
+
+      } while(++retryCounter < MAX_RETRIES && totalWritten < frame_size*sizeof(char));
+
+    }
+
+  }
 }
 
 void ForceKeyFrame(int iParm1)
-
 {
   int iVar1;
   time_t tVar2;
@@ -306,7 +329,6 @@ void receiver_closed_callback(int *piParm1)
 
 
 void ev_cleanup_func(void)
-
 {
   ev_break(ev_loop_Ptr,2);
   return;
@@ -314,7 +336,6 @@ void ev_cleanup_func(void)
 
 
 void fetchstream_thread()
-
 {
   pthread_t __th = 0;
   struct ev_loop_struct evs = {0,0,0};
@@ -334,7 +355,6 @@ void fetchstream_thread()
 #endif
   }
 
-
   shbf_rcv_global_init();
   ev_loop_Ptr = ev_default_loop(0);
   unsigned long var0 = 0;
@@ -342,8 +362,6 @@ void fetchstream_thread()
   unsigned long var3 = 3;
   unsigned long var4 = 4;
  
-
-
   ev_timer_again(ev_loop_Ptr,&local_38);
 #ifdef ENABLE_DEBUG_LOG
   printf("ev_timer_again"); 
@@ -404,35 +422,46 @@ void fetchstream_thread()
 void sig_handler(int signo)
 {
 #ifdef ENABLE_DEBUG_LOG
-    if (signo == SIGUSR1)
-        printf("received SIGUSR1\n");
-    else if (signo == SIGKILL)
-        printf("received SIGKILL\n");
-    else if (signo == SIGSTOP)
-        printf("received SIGSTOP\n");
-    else  if (signo == SIGINT)
-        printf("received SIGINT\n");
+  if (signo == SIGUSR1)
+    printf("received SIGUSR1\n");
+  else if (signo == SIGKILL)
+    printf("received SIGKILL\n");
+  else if (signo == SIGSTOP)
+    printf("received SIGSTOP\n");
+  else  if (signo == SIGINT)
+    printf("received SIGINT\n");
 #endif
 
-    cThreadRunning = 0;
+  cThreadRunning = 0;
 }
 
-void openPipe(char* path, FILE* pipes[], int channel, int* counter) {
-	FILE* auxFile;
-	auxFile = open(path, O_NONBLOCK | O_RDWR);
-	if(auxFile == NULL) {
-		printf("Can't open pipe '%s'\n", path);
-		return NULL;
-	}
-	
-	pipes[*counter] = auxFile;
-	(*counter)++;
-}
-
-void closePipes(FILE* pipes[], int counter) {
-	for(int i=0; i<counter; i++){
-		fclose(pipes[i]);
-	}
+void writeArgumentErrors(char* executableName) {
+  bool hasError = false;
+  
+  if(outputFilePath == NULL) {
+    printf("Error: output file is required\n");
+    hasError = true;
+  }
+  
+  if(targetVideoChannel == -1) {
+    printf("Error: video channel is required\n");
+    hasError = true;
+  }
+  
+  if(targetVideoChannel != CHANNEL_MAINSTREAM && targetVideoChannel != CHANNEL_SUBSTREAM) {
+    printf("Error: invalid video channel specified: %d\n", targetVideoChannel);
+    hasError = true;
+  }
+  
+  if(hasError) {
+    printf("Usage: %s -f [OUTPUT FILE] -c [VIDEO CHANNEL]\n\n", executableName);
+    printf("Output file: a regular file or FIFO\n");
+    printf("Video channel: 0 or 1\n");
+    printf("\t0: Mainstream (1920x1088)\n");
+    printf("\t0: Substream (640x384)\n");
+    
+    exit(1);
+  }
 }
 
 int main(int argc, char** args)
@@ -441,18 +470,29 @@ int main(int argc, char** args)
   int local_c = 0;
   int opt;
   
-  while ((opt = getopt (argc, args, "m:s:")) != -1)
+  while ((opt = getopt (argc, args, "f:c:")) != -1)
   {
-	  switch(opt) {
-		  case 'm':
-			openPipe(optarg, mainstreamPipes, CHANNEL_MAINSTREAM, &mainstreamCounter);
-		  break;
-		  
-		  case 's':
-			openPipe(optarg, substreamPipes, CHANNEL_SUBSTREAM, &substreamCounter);
-		  break;
-	  }
+    switch(opt) {
+      case 'f':
+        outputFilePath = optarg;
+      break;
+      
+      case 'c':
+        targetVideoChannel = atoi(optarg); //Return 0 on error, we can live with that (0 = mainstream)
+      break;
+    }
   }
+  
+  writeArgumentErrors(args[0]);
+  
+  outputFile[0].fd = open(outputFilePath, O_NONBLOCK | O_RDWR);
+  
+  if(outputFile[0].fd == -1) {
+    printf("Can't open output file '%s'\n", outputFilePath);
+    exit(2);
+  }
+
+  outputFile[0].events = POLLOUT | POLLWRBAND;
   
 #ifdef ENABLE_DEBUG_LOG  
   printf("start main\n");
@@ -462,27 +502,26 @@ int main(int argc, char** args)
   
   if (local_c != 0) {
 #ifdef ENABLE_DEBUG_LOG  
-	printf("create_fetchstream_thread ret=%d\n",local_c);
+  printf("create_fetchstream_thread ret=%d\n",local_c);
 #endif
-	exit(-1);
+    exit(-1);
   }
   
   if (signal(SIGUSR1, sig_handler) == SIG_ERR)
-        printf("\ncan't catch SIGUSR1\n");
+      printf("\ncan't catch SIGUSR1\n");
     if (signal(SIGKILL, sig_handler) == SIG_ERR)
-        printf("\ncan't catch SIGKILL\n");
+      printf("\ncan't catch SIGKILL\n");
     if (signal(SIGSTOP, sig_handler) == SIG_ERR)
-        printf("\ncan't catch SIGSTOP\n");
+      printf("\ncan't catch SIGSTOP\n");
     if (signal(SIGINT, sig_handler) == SIG_ERR)
-        printf("\ncan't catch SIGINT\n");
-	
+      printf("\ncan't catch SIGINT\n");
+  
   cThreadRunning = 1;
-  while(cThreadRunning){
+  while(cThreadRunning) {
      sleep(1);
   }
   
-  closePipes(mainstreamPipes, mainstreamCounter);
-  closePipes(substreamPipes, substreamCounter);
+  close(outputFile[0].fd);
 
 #ifdef ENABLE_DEBUG_LOG
   printf("exit %d",local_c );
