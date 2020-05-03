@@ -23,9 +23,9 @@ struct ev_loop_struct {
 };
 
 void (*ptr_process_video_frame)(uint ,int ,int ,unsigned long );
+void (*ptr_process_audio_frame)(int ,int ,unsigned long );
 
 static struct ev_loop * ev_loop_Ptr= 0;
-static unsigned long ptr_process_audio_frame= 0;
 static unsigned long hdl_VideoMainstream= 0;
 static unsigned long hdl_VideoSubstream= 0;
 static unsigned long hdl_AudioIn= 0;
@@ -47,9 +47,11 @@ static unsigned long iSubIFrameWaitCounter= 0;
 static unsigned long iMainIFrameWaitCounter= 0;
 static unsigned long LastMainFrameNo= 0;
 static unsigned long LastSubFrameNo= 0;
+static unsigned long LastAudioFrameNo= 0;
 static unsigned long iSubFrameWaitCounter= 0;
 static unsigned long LastMainFrameTime= 0;
 static unsigned long LastSubFrameTime= 0;
+static unsigned long LastAudioFrameTime= 0;
 
 static unsigned long StartTime= 0;
 static unsigned long reqTime;
@@ -64,6 +66,20 @@ static int written;
 static int totalWritten;
 static int retryCounter;
 static int pollResult;
+
+static FILE* audioPipe;
+
+
+void process_audio_frame(int ptrFrame,int ptrFramePayload,unsigned long frame_size)
+{
+	
+#ifdef ENABLE_DEBUG_LOG
+	printf("got audio frame frame_size=%d\n", frame_size);
+#endif
+	
+		write(audioPipe, ptrFramePayload, frame_size*sizeof(char));
+	
+}
 
 void process_video_frame(uint videoChannel,int ptrFrame,int ptrFramePayload,unsigned long frame_size)
 {
@@ -138,6 +154,61 @@ void ForceKeyFrame(int iParm1)
   return;
 }
 
+
+unsigned long on_recv_audio_stream(unsigned long uParm1,int *piParm2)
+
+{
+  int iVar1;
+  unsigned long uVar2;
+  int iVar3;
+  time_t tVar4;
+  int iVar5;
+  unsigned long uVar6;
+  int iVar7;
+  
+  if (piParm2 == (int *)0x0) {
+    #ifdef ENABLE_DEBUG_LOG
+	printf("on_recv_audio_stream err audio buf is NULL\n");
+	#endif
+    uVar6 = 0xffffffff;
+  }
+  else {
+    iVar3 = shbf_get_size(piParm2);
+    uVar2 = VideoSubFrameLostCntr;
+    uVar6 = VideoMainFrameLostCntr;
+    iVar1 = LastAudioFrameNo;
+    if (iVar3 + -0x20 < 1) {
+	  #ifdef ENABLE_DEBUG_LOG
+      printf("on_recv_audio_stream err audio size is 0\n");
+	  #endif
+      shbf_free(piParm2);
+      uVar6 = 0xffffffff;
+    }
+    else {
+      if (0 < *piParm2) {
+        if ((*piParm2 - LastAudioFrameNo != 1) && (LastAudioFrameNo != -1)) {
+          iVar5 = (*piParm2 - LastAudioFrameNo) + audioFrameLostCntr + -1;
+          iVar7 = *piParm2;
+          audioFrameLostCntr = iVar5;
+          tVar4 = time((time_t *)0x0);
+		  #ifdef ENABLE_DEBUG_LOG
+          printf(
+                   "audio frame lost: cur fream no: %d last frame no: %d, main/sub/audio lost cnt:[%d/%d/%d], app run time:[%d]\n"
+                   ,iVar7,iVar1,uVar6,uVar2,iVar5,tVar4 - StartTime);
+		   #endif
+        }
+        LastAudioFrameNo = *piParm2;
+      }
+      LastAudioFrameTime = time((time_t *)0x0);
+      (*ptr_process_audio_frame)(piParm2,piParm2 + 8,iVar3 + -0x20);
+      shbf_free(piParm2);
+      uVar6 = 0;
+    }
+  }
+  return uVar6;
+}
+
+
 unsigned long on_recv_video_stream(int* piParm1,int iParm2)
 { 
   int iVar1 	 = 0;
@@ -148,7 +219,7 @@ unsigned long on_recv_video_stream(int* piParm1,int iParm2)
   unsigned long uVar5 = 0;
   unsigned long uVar6 = 0;
 #ifdef ENABLE_DEBUG_LOG
-  printf("on_recv_video_stream");
+  printf("on_recv_video_stream: ");
 #endif
   if (iParm2 == 0) {
 #ifdef ENABLE_DEBUG_LOG
@@ -200,7 +271,8 @@ unsigned long on_recv_video_stream(int* piParm1,int iParm2)
             LastMainFrameNo = *(unsigned long *)(iParm2 + 4);
             shbf_free(iParm2);
             return 0;
-          }
+          }		  
+
 #ifdef ENABLE_DEBUG_LOG
           printf("main waiting for I frame fin, wait cnt: %d\n",iMainIFrameWaitCounter);
 #endif
@@ -359,6 +431,7 @@ void fetchstream_thread()
   ev_loop_Ptr = ev_default_loop(0);
   unsigned long var0 = 0;
   unsigned long var1 = 1;
+  unsigned long var2 = 2;
   unsigned long var3 = 3;
   unsigned long var4 = 4;
  
@@ -371,7 +444,7 @@ void fetchstream_thread()
 #ifdef ENABLE_DEBUG_LOG
   printf("ptr_process_video_frame");
 #endif
-  //ptr_process_audio_frame = process_audio_frame;
+  ptr_process_audio_frame = process_audio_frame;
   hdl_VideoMainstream = shbfev_rcv_create(ev_loop_Ptr,"/run/video_mainstream");
   shbfev_rcv_event(hdl_VideoMainstream,2,on_recv_video_stream,&var0);
   shbfev_rcv_event(hdl_VideoMainstream,1,receiver_closed_callback,&var0);
@@ -391,11 +464,11 @@ void fetchstream_thread()
   
   //no audio for now
   
-  //hdl_AudioIn = shbfev_rcv_create(ev_loop_Ptr,"/run/audio_in");
-  //shbfev_rcv_event(hdl_AudioIn,2,on_recv_audio_stream,&var2);
-  //shbfev_rcv_event(hdl_AudioIn,1,receiver_closed_callback,&var2);
-  //shbfev_rcv_event(hdl_AudioIn,0,on_stream_start,&var2);
-  //shbfev_rcv_start(hdl_AudioIn);
+  hdl_AudioIn = shbfev_rcv_create(ev_loop_Ptr,"/run/audio_in");
+  shbfev_rcv_event(hdl_AudioIn,2,on_recv_audio_stream,&var2);
+  shbfev_rcv_event(hdl_AudioIn,1,receiver_closed_callback,&var2);
+  shbfev_rcv_event(hdl_AudioIn,0,on_stream_start,&var2);
+  shbfev_rcv_start(hdl_AudioIn);
   //hdl_AudioPlay = shbfev_rcv_create(ev_loop_Ptr,"/run/audio_play");
   //shbfev_rcv_event(hdl_AudioPlay,1,receiver_closed_callback,&var3);
   //shbfev_rcv_event(hdl_AudioPlay,0,on_stream_start,&var3);
@@ -410,7 +483,7 @@ void fetchstream_thread()
   ev_timer_again(ev_loop_Ptr,&local_38);
   shbfev_rcv_destroy(hdl_VideoMainstream);
   shbfev_rcv_destroy(hdl_VideoSubstream);
-  //shbfev_rcv_destroy(hdl_AudioIn);
+  shbfev_rcv_destroy(hdl_AudioIn);
   //shbfev_rcv_destroy(hdl_AudioPlay);
   shbf_rcv_global_exit();
   ev_loop_destroy(ev_loop_Ptr);
@@ -458,7 +531,7 @@ void writeArgumentErrors(char* executableName) {
     printf("Output file: a regular file or FIFO\n");
     printf("Video channel: 0 or 1\n");
     printf("\t0: Mainstream (1920x1088)\n");
-    printf("\t0: Substream (640x384)\n");
+    printf("\t1: Substream (640x384)\n");
     
     exit(1);
   }
@@ -470,7 +543,7 @@ int main(int argc, char** args)
   int local_c = 0;
   int opt;
   
-  while ((opt = getopt (argc, args, "f:c:")) != -1)
+  while ((opt = getopt (argc, args, "f:c:a:")) != -1)
   {
     switch(opt) {
       case 'f':
@@ -480,6 +553,10 @@ int main(int argc, char** args)
       case 'c':
         targetVideoChannel = atoi(optarg); //Return 0 on error, we can live with that (0 = mainstream)
       break;
+
+      case 'a':
+			  //openPipe(optarg, audioPipes, 0, &audioPipeCounter);
+			break;
     }
   }
   
@@ -522,6 +599,7 @@ int main(int argc, char** args)
   }
   
   close(outputFile[0].fd);
+  //closePipes(audioPipes, audioPipeCounter);
 
 #ifdef ENABLE_DEBUG_LOG
   printf("exit %d",local_c );
