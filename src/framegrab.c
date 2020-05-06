@@ -569,7 +569,7 @@ int main(int argc, char** args)
     exit(2);
   }
 
-  outputFile[0].events = POLLOUT | POLLWRBAND;
+  outputFile[0].events = POLLOUT; // | POLLWRBAND;
   
 #ifdef ENABLE_DEBUG_LOG  
   printf("start main\n");
