@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include <stdio.h>
 #include <unistd.h>
 #include <pthread.h>
@@ -59,15 +60,13 @@ static unsigned long hdlBuffer;
 
 static char cThreadRunning = 0;
 
-static char* outputFilePath = NULL;
-static struct pollfd outputFile[1];
-static int targetVideoChannel = -1;
 static int written;
 static int totalWritten;
 static int retryCounter;
 static int pollResult;
 
-static FILE* audioPipe;
+static FILE* videoPipe=NULL;
+static FILE* audioPipe=NULL;
 
 
 void process_audio_frame(int ptrFrame,int ptrFramePayload,unsigned long frame_size)
@@ -81,6 +80,7 @@ void process_audio_frame(int ptrFrame,int ptrFramePayload,unsigned long frame_si
 	
 }
 
+/*
 void process_video_frame(uint videoChannel,int ptrFrame,int ptrFramePayload,unsigned long frame_size)
 {
 #ifdef ENABLE_DEBUG_LOG
@@ -117,7 +117,35 @@ void process_video_frame(uint videoChannel,int ptrFrame,int ptrFramePayload,unsi
     }
 
   }
+}*/
+
+
+void process_video_frame(uint videoChannel,int ptrFrame,int ptrFramePayload,unsigned long frame_size)
+{
+	
+#ifdef ENABLE_DEBUG_LOG
+	printf("got frame %d frame_size=%d\n",videoChannel, frame_size);
+#endif
+/*
+	if(videoChannel == 0){
+		for(int i=0; i<mainstreamCounter; i++) {
+			write(mainstreamPipes[i], ptrFramePayload, frame_size*sizeof(char));
+		}
+	}
+	
+	if(videoChannel == 1){
+		for(int i=0; i<substreamCounter; i++) {
+			write(substreamPipes[i], ptrFramePayload, frame_size*sizeof(char));
+		}
+	}
+*/
+	if(videoChannel == 0){ // 0 is mainstream
+		write(videoPipe, ptrFramePayload, frame_size*sizeof(char));
+	}
+	
 }
+
+
 
 void ForceKeyFrame(int iParm1)
 {
@@ -453,11 +481,11 @@ void fetchstream_thread()
 #ifdef ENABLE_DEBUG_LOG
   printf("shbfev_rcv_start(hdl_VideoMainstream)");
 #endif
-  hdl_VideoSubstream = shbfev_rcv_create(ev_loop_Ptr,"/run/video_substream");
+/*  hdl_VideoSubstream = shbfev_rcv_create(ev_loop_Ptr,"/run/video_substream");
   shbfev_rcv_event(hdl_VideoSubstream,2,on_recv_video_stream,&var1);
   shbfev_rcv_event(hdl_VideoSubstream,1,receiver_closed_callback,&var1);
   shbfev_rcv_event(hdl_VideoSubstream,0,on_stream_start,&var1);
-  shbfev_rcv_start(hdl_VideoSubstream);
+  shbfev_rcv_start(hdl_VideoSubstream);*/
 #ifdef ENABLE_DEBUG_LOG
   printf("shbfev_rcv_start hdl_VideoSubstream");
 #endif
@@ -482,7 +510,7 @@ void fetchstream_thread()
   ev_run(ev_loop_Ptr,0);
   ev_timer_again(ev_loop_Ptr,&local_38);
   shbfev_rcv_destroy(hdl_VideoMainstream);
-  shbfev_rcv_destroy(hdl_VideoSubstream);
+// No substream please  shbfev_rcv_destroy(hdl_VideoSubstream);
   shbfev_rcv_destroy(hdl_AudioIn);
   //shbfev_rcv_destroy(hdl_AudioPlay);
   shbf_rcv_global_exit();
@@ -511,27 +539,14 @@ void sig_handler(int signo)
 void writeArgumentErrors(char* executableName) {
   bool hasError = false;
   
-  if(outputFilePath == NULL) {
+  if(videoPipe == NULL || audioPipe==NULL) {
     printf("Error: output file is required\n");
     hasError = true;
   }
   
-  if(targetVideoChannel == -1) {
-    printf("Error: video channel is required\n");
-    hasError = true;
-  }
-  
-  if(targetVideoChannel != CHANNEL_MAINSTREAM && targetVideoChannel != CHANNEL_SUBSTREAM) {
-    printf("Error: invalid video channel specified: %d\n", targetVideoChannel);
-    hasError = true;
-  }
-  
   if(hasError) {
-    printf("Usage: %s -f [OUTPUT FILE] -c [VIDEO CHANNEL]\n\n", executableName);
+    printf("Usage: %s -f [VIDEO OUTPUT FILE] -a [AUDIO OUTPUT FILE]\n\n", executableName);
     printf("Output file: a regular file or FIFO\n");
-    printf("Video channel: 0 or 1\n");
-    printf("\t0: Mainstream (1920x1088)\n");
-    printf("\t1: Substream (640x384)\n");
     
     exit(1);
   }
@@ -543,26 +558,25 @@ int main(int argc, char** args)
   int local_c = 0;
   int opt;
   
-  while ((opt = getopt (argc, args, "f:c:a:")) != -1)
+  while ((opt = getopt (argc, args, "f:a:")) != -1)
   {
     switch(opt) {
       case 'f':
-        outputFilePath = optarg;
+        videoPipe = open(optarg, O_NONBLOCK | O_RDWR);
+	fcntl(videoPipe,F_SETPIPE_SZ,640000);
       break;
       
-      case 'c':
-        targetVideoChannel = atoi(optarg); //Return 0 on error, we can live with that (0 = mainstream)
-      break;
-
       case 'a':
-			  //openPipe(optarg, audioPipes, 0, &audioPipeCounter);
-			break;
+        //openPipe(optarg, audioPipes, 0, &audioPipeCounter);
+        audioPipe = open(optarg, O_NONBLOCK | O_RDWR);
+	fcntl(audioPipe,F_SETPIPE_SZ,128000);
+      break;
     }
   }
   
   writeArgumentErrors(args[0]);
   
-  outputFile[0].fd = open(outputFilePath, O_NONBLOCK | O_RDWR);
+/*  outputFile[0].fd = open(outputFilePath, O_NONBLOCK | O_RDWR);
   
   if(outputFile[0].fd == -1) {
     printf("Can't open output file '%s'\n", outputFilePath);
@@ -570,7 +584,7 @@ int main(int argc, char** args)
   }
 
   outputFile[0].events = POLLOUT; // | POLLWRBAND;
-  
+  */
 #ifdef ENABLE_DEBUG_LOG  
   printf("start main\n");
 #endif
@@ -598,8 +612,10 @@ int main(int argc, char** args)
      sleep(1);
   }
   
-  close(outputFile[0].fd);
+  //close(outputFile[0].fd);
   //closePipes(audioPipes, audioPipeCounter);
+  if(audioPipe!=NULL) fclose(audioPipe);
+  if(videoPipe!=NULL) fclose(audioPipe);
 
 #ifdef ENABLE_DEBUG_LOG
   printf("exit %d",local_c );

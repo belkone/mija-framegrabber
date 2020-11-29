@@ -1,7 +1,8 @@
-CROSS_COMPILE ?=arm-linux-gnueabihf-
+CROSS_COMPILE ?=arm-unknown-linux-uclibcgnueabihf-
 GCC ?= $(CROSS_COMPILE)gcc
 
-C_FLAGS := -w -O2 -std=gnu99 -march=armv7-a -fPIC -DPIC -DOMXILCOMPONENTSPATH=\"/$(BUILD_DIR)\" -DCONFIG_DEBUG_LEVEL=255
+#C_FLAGS := -w -O2 -std=gnu99 -march=armv7-a -fPIC -DPIC -DOMXILCOMPONENTSPATH=\"/$(BUILD_DIR)\" -DCONFIG_DEBUG_LEVEL=255
+C_FLAGS := -w -O2 -std=gnu99 -march=armv7-a -fPIC -DPIC -DOMXILCOMPONENTSPATH=\"/$(BUILD_DIR)\" -I ./
 C_INCLUDES := -I./include
 
 LDFLAGS := -L./lib/$(MODEL) $(LIBS) $(DYNAMICLINKER)
